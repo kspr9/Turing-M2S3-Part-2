@@ -169,13 +169,130 @@ Material from --> [Avoiding flaws](https://opentezos.com/smart-contracts/avoidin
 10. **Re-entrancy flaws**
     > A re-entrancy attack was the cause of the infamous DAO hack that took place on Ehtereum in June 2016, and eventually lead to the fork of Ethereum into Ethereum and Ethereum Classic. Tezos has been designed in a way that makes re-entrancy bugs less likely, but they are still possible. They happen when the attacked contract calls another contract, that may in turn call the attacked contract in a way that breaks assumptions made by its internal logic.
 
+    ### Example of flawed contracts
+    The two contracts below manage unique tokens identified by IDs. The first contract is a simple ledger that keeps track of who owns each token. The second contract is in charge of purchasing tokens at predifined prices.
+
+    ![Ledger contract](reentrancyflaws1.png)  
+
+    ![Purchase handler](reentrancyflaws2.png)  
+
+    ![Attacker contract](reentrancyflaws3.png)  
+
+    In this example, the owner of an asset can exploit the fact that he is the owner of the asset. And assuming there is extra funds in the ledger, they can 'purhcase' the asset, but still remain the owner.
+
+    What makes this flaw possible and hard to detect is that a new call to the purchase contract can be initiated in the middle of the execution of its different steps, interferring with the business logic that otherwise seems very sound:
+    - send tez to the seller
+    - take ownership of the token  <br>
     
+    What really happens is:
+    - send tez to the seller
+    - seller does all kinds of things, including trying to sell its token a second time
+    - take ownership of the token  
+
+    ### **Best practice**
+    There are two methods to avoid re-entrancy flaws.
+
+    1. Order the steps in a safe way.  
+    The idea is to start with the steps that prevents future similar calls.  
+
+        In our example, the flaw would have been avoided, if we simply changed the order of these two instructions:
+        - create transfer of purchasePrices[tokenID].price to caller
+        - create call to tokenContract.changeOwner(tokenID, self)
+        
+        Into:
+        - create call to tokenContract.changeOwner(tokenID, self)
+        - create transfer of purchasePrices[tokenID].price to caller
+    2. Use a flag to prevent any re-entrancy  
+    This approach is more radical and very safe: 
+    - put a boolean flag "isRunning" in the storage, that will be set to true while the contract is being used.  
+
+    The code of the entry point should have this structure:
+
+    - check that isRunning is false
+    - set isRunning to true
+    - perform all the logic, including creating calls to other contracts
+    - create a call to an entry point that sets isRunning to false
+
 11. **Unsafe use of Oracles**
+    > Oracles provide a way for smart contracts to obtain information about the rest of the world, such as exchange rates, outcomes of games or elections. As they usually rely on services that are hosted off-chain, they don't benefit from the same safety measures and trustless features provided by the blockchain. Using them comes with its own flaws, from using oracles that provide information that can be manipulated by single entities or a small number of colluding entities, to oracles that simply stop working and provide obsolete information. Some types of oracles, such as online price oracles, may be manipulated by contracts to provide incorrect information. Every time an oracle returns inaccurate information, it creates an opportunity for attackers to take advantage of the situtation and steal funds.  
+
+    ### **A typical oracle is composed of two parts:**
+
+    - an off-chain service that collects information from one or more sources
+    - an oracle smart contract, that receives this information, as well as requests from other contracts (in the case of on-demand oracles)  
+
+    <br>The off-chain service tracks the requests made to the smart contract, fetches the information, and calls the oracle contract with this information, so that it can store it and provide it to other contracts, usually for a fee.
+
+    ### **Danger 1**: using a centralized oracle
+    > If the off-chain service is controlled by a single entity that just sends the requested information without any way to verify its origin and validity, anyone who uses this oracle is at risk.  
+
+    Good decentralized oracles include systems that prevent single entities from stopping the oracle or manipulating the information it sends.
+
+    **Best pracice**: only use oracles that are decentralized, in such a way that no single entity, or even no small group of colluding entities, may stop the oracle from working, or provide manipulated information.
+
+    ### **Danger 2**: not checking the freshness of information
+    > Oracles often provide information that may change over time, such as the exchange rate between two currencies. Information that is perfectly valid at one point, become obsolete and incorrect just a few minutes later.
+    
+    Good oracles always attach a timestamp to the information they provide.
+
+    **Best practice**: make sure your contract always checks that the timestamp attached to information provided by oracles is recent.
+
+    ### **Danger 3**: using on-chain oracles that can be manipulated
+    > On-chain oracles don't provide data from off-chain sources. Instead, they provide access to data collected from other smart contracts. For example, an on-chain oracle could collect and provide data about the exchange rate between two tokens from one or more DEXes (Decentralized EXchanges) running on the same blockchain.  
+
+    **Example of attack**: an attacking contract could perform the following steps:
+
+    - use a flash-loan to borrow a lot of tez
+    - buy a large number of tokens from one DEX, which temporarily increases the price of this token in this DEX
+    - call a contract that makes bad decisions based on this manipulated price, obtained though an unprotected Oracle
+    - profit from these bad decisions
+    - sell the tokens back to the DEX
+    - pay the flash-loan back, with interest  
+    
+    <br>Good online oracles never simply return the current value obtained from a single DEX. Instead, they use recent but past historical values, get rid of outliers and use the median of the remaining values. When possible, they combine data from multiple DEXes.
+
+    **Best practice**: if you need to make decisions based on the price of tokens from a DEX, make sure you always get the prices through a good online oracle that uses this type of measures.
+
 12. **Forgetting to add an entry point to extract funds**
+    > Being the author of a contract, and having deployed the contract yourself, doesn't automatically give you any specific rights about that contract. In particular, it doesn't give you any rights to extract funds from the balance of your own contract. All the profits earned by your contract may be locked forever, if you don't plan for any way to collect them.  
+
+    ### **Best practice**  
+    Always verify that you have some way to extract the benefits earned by your smart contract. Ideally, make sure you do so using a multi-sig contract, so that you have a backup system in case you lose access to your private keys.
+
+    **Warning**: this may seem very obvious, but note that this very unfortunate situation happens more often that you may think.
+
+    More generally, when you test your contract, make sure you test the whole life cycle of the contract, including what should happen at the end of its life.
+
 13. **Calling upgradable contracts**
+    > On Tezos, contracts are not upgradable by default: once a contract has been deployed, there is no way to modify its code, for example to fix a bug. There are however several ways to make them upgradable. Doing so provides extra security for the author of the contract who has a chance to fix any mistakes, but may cause very significant risks for any user who relies on the contract.
+
+    **Reminder**: ways to upgrade a contract
+    There are two main ways to make a contract upgradable:
+
+    - put part of the logic in a piece of code (a lambda), in the storage of the contract
+    - put part of the logic in a separate contract, whose address is in the storage of the main contract
+    
+    <br>In either case, provide an entry point that the admin may call, to change these values, and therefore change the behavior of the contract.
+
+    ### **Example of attack**
+    Imagine that you write a contract, that relies on an upgradable DEX contract. You have carefully checked the code of that contract, that many other users have used before. The contract is upgradable, and you feel safe because that means the author may be able to fix any bugs they may notice.
+
+    Then one day, all the funds disappear from your contract. As often, your contract used the DEX to exchange your tokens for a different type of tokens, but somehow, you never received the new tokens.
+
+    You then realize that the owner of the DEX has gone rogue, and decided to upgrade its contract, in a way that the DEX collects tokens but never sends any back in exchange.  
+
+    ### **Best practice**
+    Before you use a contract, directly or as part of your own contract, make sure this contract can't be upgraded in a way that breaks the key aspects that you rely on.
+
+    If the contract you want to use is upgradable, make sure the upgrade system follows a very safe process, where the new version is known well in advance, and the decision to to activate the upgrade is done by a large enough set of independent users.
+
 14. **Misunderstanding the API of a contract**
+    > There are many contracts that provide a similar, common service: DEXes, Oracles, Escrows, Marketplaces, Tokens, Auctions, DAOs, etc. As you get familiar with these different types of contracts, you start automatically making assumptions about how they behave. This may lead you to take shortcuts when interacting with a new contract, read the documentation and the contract a bit too fast, and miss a key difference between this contract and the similar ones you have used in the past. This can have very unfortunate consequences.
 
+    ### **Best practice**
+    Never make any assumptions about a contract you need to use, based on your previous experience with similar contracts. Always check their documentation and code very carefully, before you use it.
 
+<br>
 
 ## PART 1  
 
